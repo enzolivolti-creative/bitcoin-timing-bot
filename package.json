@@ -1,26 +1,16 @@
 {
   "name": "bitcoin-timing-bot",
   "version": "2.0.0",
-  "description": "Bot Telegram autonomo per alert Bitcoin timing con News Intelligence",
+  "description": "Bot Telegram Bitcoin con News Intelligence",
   "main": "bot_with_news.js",
   "scripts": {
-    "start": "node bot_with_news.js",
-    "start:basic": "node bot.js",
-    "dev": "nodemon bot_with_news.js"
+    "start": "node bot_with_news.js"
   },
-  "keywords": ["bitcoin", "telegram", "bot", "trading", "news", "sentiment"],
-  "author": "Bitcoin Timing Agent",
-  "license": "MIT",
   "dependencies": {
     "node-telegram-bot-api": "^0.64.0",
     "node-cron": "^3.0.3",
     "axios": "^1.6.2",
-    "dotenv": "^16.3.1",
-    "cheerio": "^1.0.0-rc.12",
-    "rss-parser": "^3.13.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.2"
+    "dotenv": "^16.3.1"
   },
   "engines": {
     "node": ">=18.0.0"
