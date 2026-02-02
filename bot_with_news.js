@@ -1,4 +1,4 @@
-// Final version - No Binance (avoids 451 completely)
+// Final version - With historical data import for immediate accuracy
 const TelegramBot = require('node-telegram-bot-api');
 const cron = require('node-cron');
 const axios = require('axios');
@@ -22,9 +22,10 @@ let lastBuyScore = 0;
 let lastSellScore = 0;
 let lastAction = 'HOLD';
 let isMonitoring = true;
-let priceHistory = []; // Cache prezzi per analisi
+let priceHistory = [];
+let isInitialized = false;
 
-console.log('🤖 Bitcoin Bot - CoinGecko Mode (No 451!)');
+console.log('🤖 Bitcoin Bot - Con Import Dati Storici');
 console.log(`📊 Check ogni ${CHECK_INTERVAL} min`);
 console.log(`⚡ ${RISK_PROFILE}`);
 
@@ -40,8 +41,57 @@ const profileMultipliers = {
   Aggressive: { position: 0.5, stopLoss: 0.05, tp1: 1.12, tp2: 1.25 }
 };
 
+// ==================== HISTORICAL DATA IMPORT ====================
+
+async function importHistoricalData() {
+  try {
+    console.log('📥 Import dati storici da CoinGecko...');
+    
+    // CoinGecko: market_chart endpoint (ultimi 200 giorni)
+    const response = await axios.get(
+      'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart',
+      {
+        params: {
+          vs_currency: 'usd',
+          days: '200',
+          interval: 'daily'
+        },
+        timeout: 30000,
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'BitcoinTimingBot/1.0'
+        }
+      }
+    );
+    
+    if (response.data && response.data.prices) {
+      // Format: [[timestamp, price], [timestamp, price], ...]
+      const prices = response.data.prices.map(item => item[1]);
+      
+      priceHistory = prices;
+      
+      console.log(`✅ Importati ${priceHistory.length} prezzi storici`);
+      console.log(`📊 Range: $${Math.min(...priceHistory).toFixed(0)} - $${Math.max(...priceHistory).toFixed(0)}`);
+      console.log(`💰 Ultimo prezzo: $${priceHistory[priceHistory.length - 1].toFixed(2)}`);
+      
+      isInitialized = true;
+      return true;
+    }
+    
+    console.warn('⚠️ Formato dati inatteso da CoinGecko');
+    return false;
+    
+  } catch (error) {
+    console.error(`❌ Errore import: ${error.message}`);
+    console.log('⚠️ Continuo con raccolta dati manuale');
+    return false;
+  }
+}
+
+// ==================== TECHNICAL INDICATORS ====================
+
 function calculateRSI(prices, period = 14) {
-  if (prices.length < period + 1) return 50; // Neutral default
+  if (prices.length < period + 1) return 50;
   let gains = 0, losses = 0;
   for (let i = prices.length - period; i < prices.length; i++) {
     const change = prices[i] - prices[i - 1];
@@ -77,11 +127,12 @@ function calculateSMA(prices, period) {
   return recentPrices.reduce((a, b) => a + b) / period;
 }
 
-async function getBitcoinPrice() {
+// ==================== PRICE DATA ====================
+
+async function getCurrentPrice() {
   try {
-    // CoinGecko - più affidabile, no geoblocking
     const response = await axios.get(
-      'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_market_cap=true',
+      'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true',
       {
         timeout: 10000,
         headers: {
@@ -100,7 +151,7 @@ async function getBitcoinPrice() {
     
     return null;
   } catch (error) {
-    console.warn(`⚠️ CoinGecko: ${error.message}`);
+    console.warn(`⚠️ Prezzo corrente: ${error.message}`);
     return null;
   }
 }
@@ -118,17 +169,18 @@ async function getFearGreed() {
     
     return null;
   } catch (error) {
-    console.warn('⚠️ F&G skip');
     return null;
   }
 }
+
+// ==================== MARKET ANALYSIS ====================
 
 async function analyzeMarket() {
   try {
     console.log(`🔍 [${new Date().toLocaleTimeString()}] Analisi...`);
     
-    // Get price from CoinGecko
-    const priceData = await getBitcoinPrice();
+    // Get current price
+    const priceData = await getCurrentPrice();
     
     if (!priceData) {
       console.error('❌ Impossibile ottenere prezzo');
@@ -140,34 +192,48 @@ async function analyzeMarket() {
     
     console.log(`💰 $${currentPrice.toFixed(2)} (${priceChangePct >= 0 ? '+' : ''}${priceChangePct.toFixed(2)}%)`);
     
-    // Build price history
-    priceHistory.push(currentPrice);
-    if (priceHistory.length > 200) {
-      priceHistory.shift(); // Keep last 200
+    // Update price history
+    if (isInitialized) {
+      // Replace last price with current (more accurate)
+      priceHistory[priceHistory.length - 1] = currentPrice;
+      // Add new price for next analysis
+      priceHistory.push(currentPrice);
+      // Keep max 300 prices
+      if (priceHistory.length > 300) {
+        priceHistory.shift();
+      }
+    } else {
+      // Manual collection mode
+      priceHistory.push(currentPrice);
+      if (priceHistory.length < 50) {
+        console.log(`📊 Raccolta dati... ${priceHistory.length}/50`);
+        return;
+      }
     }
     
-    // Need at least 50 prices for meaningful analysis
-    if (priceHistory.length < 50) {
-      console.log(`📊 Raccolta dati... ${priceHistory.length}/50`);
-      return;
-    }
-    
-    // Get Fear & Greed (optional)
+    // Get Fear & Greed
     const fearGreedValue = await getFearGreed();
+    if (fearGreedValue) {
+      console.log(`😨 Fear & Greed: ${fearGreedValue}`);
+    }
     
     // Calculate indicators
     const rsi = calculateRSI(priceHistory);
     const bollinger = calculateBollinger(priceHistory);
+    const sma50 = calculateSMA(priceHistory, Math.min(50, priceHistory.length));
     const sma200 = calculateSMA(priceHistory, Math.min(200, priceHistory.length));
     const recentHigh = Math.max(...priceHistory);
+    const recentLow = Math.min(...priceHistory.slice(-90)); // Last 90 days
     const drawdown = ((currentPrice - recentHigh) / recentHigh) * 100;
     
-    console.log(`📈 RSI: ${rsi.toFixed(1)}, DD: ${drawdown.toFixed(1)}%`);
+    console.log(`📈 RSI: ${rsi.toFixed(1)}, DD: ${drawdown.toFixed(1)}%, Hist: ${priceHistory.length}`);
     
-    // Buy Score
+    // ==================== BUY SCORE ====================
+    
     let buyScore = 0;
     const buyReasons = [];
     
+    // RSI Analysis
     if (rsi < 25) {
       buyScore += 30;
       buyReasons.push(`RSI molto ipervenduto (${rsi.toFixed(1)})`);
@@ -178,41 +244,54 @@ async function analyzeMarket() {
       buyScore += 5;
     }
     
+    // Bollinger Bands
     if (bollinger && bollinger.position === 'below_lower') {
       buyScore += 20;
-      buyReasons.push('Sotto banda Bollinger');
+      buyReasons.push('Prezzo sotto banda Bollinger inferiore');
     }
     
+    // Fear & Greed
     if (fearGreedValue !== null) {
       if (fearGreedValue < 20) {
         buyScore += 25;
-        buyReasons.push(`Paura estrema (${fearGreedValue})`);
+        buyReasons.push(`Paura estrema nel mercato (${fearGreedValue})`);
       } else if (fearGreedValue < 30) {
         buyScore += 15;
-        buyReasons.push(`Paura mercato (${fearGreedValue})`);
+        buyReasons.push(`Sentimento di paura (${fearGreedValue})`);
       } else if (fearGreedValue < 50) {
         buyScore += 5;
       }
     }
     
+    // SMA Support
     if (sma200 && Math.abs(currentPrice - sma200) / sma200 < 0.02) {
       buyScore += 10;
-      buyReasons.push(`Supporto SMA200 ($${sma200.toFixed(0)})`);
+      buyReasons.push(`Supporto SMA200 a $${sma200.toFixed(0)}`);
     }
     
+    // Near recent lows
+    if (Math.abs(currentPrice - recentLow) / recentLow < 0.03) {
+      buyScore += 10;
+      buyReasons.push(`Vicino ai minimi recenti ($${recentLow.toFixed(0)})`);
+    }
+    
+    // Drawdown
     if (drawdown <= -60) {
       buyScore += 10;
-      buyReasons.push(`Drawdown severo (${drawdown.toFixed(1)}%)`);
+      buyReasons.push(`Drawdown molto severo (${drawdown.toFixed(1)}%)`);
     } else if (drawdown <= -40) {
       buyScore += 5;
+      buyReasons.push(`Drawdown significativo (${drawdown.toFixed(1)}%)`);
     }
     
     buyScore = Math.max(0, Math.min(100, buyScore));
     
-    // Sell Score
+    // ==================== SELL SCORE ====================
+    
     let sellScore = 0;
     const sellReasons = [];
     
+    // RSI Analysis
     if (rsi > 80) {
       sellScore += 30;
       sellReasons.push(`RSI molto ipercomprato (${rsi.toFixed(1)})`);
@@ -223,30 +302,39 @@ async function analyzeMarket() {
       sellScore += 10;
     }
     
+    // Bollinger Bands
     if (bollinger && bollinger.position === 'above_upper') {
       sellScore += 20;
-      sellReasons.push('Sopra banda Bollinger');
+      sellReasons.push('Prezzo sopra banda Bollinger superiore');
     }
     
+    // Fear & Greed
     if (fearGreedValue !== null) {
       if (fearGreedValue > 85) {
         sellScore += 25;
-        sellReasons.push(`Avidità estrema (${fearGreedValue})`);
+        sellReasons.push(`Avidità estrema nel mercato (${fearGreedValue})`);
       } else if (fearGreedValue > 75) {
         sellScore += 15;
-        sellReasons.push(`Avidità mercato (${fearGreedValue})`);
+        sellReasons.push(`Sentimento di avidità (${fearGreedValue})`);
       }
     }
     
-    const sma50 = calculateSMA(priceHistory, Math.min(50, priceHistory.length));
+    // Near highs with uptrend
     if (sma50 && sma200 && currentPrice > sma50 && sma50 > sma200 && drawdown >= -10) {
       sellScore += 15;
-      sellReasons.push('Vicino massimi');
+      sellReasons.push('Prezzo vicino ai massimi in uptrend');
+    }
+    
+    // Very near all-time high
+    if (drawdown >= -5) {
+      sellScore += 10;
+      sellReasons.push(`Molto vicino ai massimi (${drawdown.toFixed(1)}%)`);
     }
     
     sellScore = Math.max(0, Math.min(100, sellScore));
     
-    // Determine action
+    // ==================== ACTION DETERMINATION ====================
+    
     const thresholds = profileThresholds[RISK_PROFILE];
     const multipliers = profileMultipliers[RISK_PROFILE];
     
@@ -282,6 +370,7 @@ async function analyzeMarket() {
       confidence = 45;
     }
     
+    // Trading plan
     const entryLow = currentPrice * 0.985;
     const entryHigh = currentPrice * 1.015;
     const stopLossPrice = currentPrice * (1 - multipliers.stopLoss);
@@ -295,14 +384,17 @@ async function analyzeMarket() {
     console.log(`📊 Buy: ${buyScore}, Sell: ${sellScore} → ${action}`);
     
     // Check if should notify
+    const significantChange = Math.abs(buyScore - lastBuyScore) >= 10 || Math.abs(sellScore - lastSellScore) >= 10;
+    const actionChanged = action !== lastAction && action !== 'HOLD';
+    const thresholdMet = buyScore >= BUY_THRESHOLD || sellScore >= SELL_THRESHOLD;
+    const strongSignal = action === 'BUY_STRONG' || action === 'SELL_STRONG';
+    
     const shouldNotify = (
-      (action !== lastAction && action !== 'HOLD') ||
-      buyScore >= BUY_THRESHOLD ||
-      sellScore >= SELL_THRESHOLD ||
-      (ONLY_STRONG_SIGNALS && (action === 'BUY_STRONG' || action === 'SELL_STRONG'))
+      (actionChanged || thresholdMet || (ONLY_STRONG_SIGNALS && strongSignal)) &&
+      significantChange
     );
     
-    if (shouldNotify && Math.abs(buyScore - lastBuyScore) >= 10) {
+    if (shouldNotify) {
       await sendAlert({
         action, actionIcon, actionText, confidence, currentPrice, priceChangePct,
         buyScore, sellScore, buyReasons, sellReasons,
@@ -317,9 +409,11 @@ async function analyzeMarket() {
     lastAction = action;
     
   } catch (error) {
-    console.error('❌ Errore:', error.message);
+    console.error('❌ Errore analisi:', error.message);
   }
 }
+
+// ==================== ALERT SYSTEM ====================
 
 async function sendAlert(data) {
   try {
@@ -351,75 +445,96 @@ ${actionIcon} <b>${actionText}</b>
 
     if (action.startsWith('BUY')) {
       message += `
-🎯 <b>PIANO</b>
+🎯 <b>PIANO TRADING</b>
 • Entry: $${entryLow.toFixed(0)}-${entryHigh.toFixed(0)}
-• Pos: ${positionSize.toFixed(0)}%
-• Stop: $${stopLossPrice.toFixed(0)} (${stopLossPct.toFixed(1)}%)
-• TP1: $${tp1Price.toFixed(0)} (+${tp1Pct.toFixed(1)}%)
-• TP2: $${tp2Price.toFixed(0)} (+${tp2Pct.toFixed(1)}%)
+• Posizione: ${positionSize.toFixed(0)}% portafoglio
+• Stop Loss: $${stopLossPrice.toFixed(0)} (${stopLossPct.toFixed(1)}%)
+• Take Profit 1: $${tp1Price.toFixed(0)} (+${tp1Pct.toFixed(1)}%)
+• Take Profit 2: $${tp2Price.toFixed(0)} (+${tp2Pct.toFixed(1)}%)
 
-💡 <b>PERCHÉ</b>
+💡 <b>PERCHÉ ORA</b>
 `;
       buyReasons.slice(0, 3).forEach(r => message += `• ${r}\n`);
       
     } else if (action.startsWith('SELL')) {
       message += `
-🎯 <b>AZIONE</b>
-• Vendi: ${positionSize.toFixed(0)}%
-• Stop: $${stopLossPrice.toFixed(0)}
+🎯 <b>AZIONE SUGGERITA</b>
+• Vendi: ${positionSize.toFixed(0)}% posizione
+• Stop Loss (trailing): $${stopLossPrice.toFixed(0)}
 
-💡 <b>PERCHÉ</b>
+💡 <b>PERCHÉ ORA</b>
 `;
       sellReasons.slice(0, 3).forEach(r => message += `• ${r}\n`);
     }
     
     message += `
 📊 <b>INDICATORI</b>
-• RSI: ${rsi.toFixed(1)}
-• F&G: ${fearGreedValue || 'N/A'}
-• DD: ${drawdown.toFixed(1)}%
+• RSI(14): ${rsi.toFixed(1)}
+• Fear & Greed: ${fearGreedValue || 'N/A'}
+• Drawdown: ${drawdown.toFixed(1)}%
 
 ⏰ ${new Date().toLocaleString('it-IT')}
 `;
 
     await bot.sendMessage(CHAT_ID, message, { parse_mode: 'HTML' });
-    console.log(`✅ Alert inviato!`);
+    console.log(`✅ Alert inviato: ${actionText}`);
     
   } catch (error) {
-    console.error('❌ Alert fallito:', error.message);
+    console.error('❌ Errore alert:', error.message);
   }
 }
 
-// Commands
+// ==================== BOT COMMANDS ====================
+
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(msg.chat.id, `
-🤖 <b>Bitcoin Bot</b>
+🤖 <b>Bitcoin Timing Bot</b>
 
+✅ Dati storici: ${isInitialized ? 'Importati' : 'In raccolta'}
 ⚙️ Check ogni ${CHECK_INTERVAL} min
-⚡ ${RISK_PROFILE}
+⚡ Profilo: ${RISK_PROFILE}
+📊 Prezzi in memoria: ${priceHistory.length}
 
-/status - Analisi
-/pause - Pausa
-/resume - Attivo
+📋 <b>Comandi:</b>
+/status - Analisi immediata
+/info - Stato sistema
+/pause - Pausa monitoraggio
+/resume - Riprendi monitoraggio
 `, { parse_mode: 'HTML' });
 });
 
 bot.onText(/\/status/, async (msg) => {
-  await bot.sendMessage(msg.chat.id, '🔍 Analisi...');
+  await bot.sendMessage(msg.chat.id, '🔍 Analisi in corso...');
   await analyzeMarket();
+});
+
+bot.onText(/\/info/, (msg) => {
+  bot.sendMessage(msg.chat.id, `
+📊 <b>Stato Sistema</b>
+
+• Prezzi storici: ${priceHistory.length}
+• Dati importati: ${isInitialized ? '✅' : '❌'}
+• Monitoraggio: ${isMonitoring ? '🟢 Attivo' : '🔴 Pausa'}
+• Profilo: ${RISK_PROFILE}
+• Soglie: Buy=${BUY_THRESHOLD}, Sell=${SELL_THRESHOLD}
+• Ultimo Buy Score: ${lastBuyScore}
+• Ultimo Sell Score: ${lastSellScore}
+• Ultima azione: ${lastAction}
+`, { parse_mode: 'HTML' });
 });
 
 bot.onText(/\/pause/, (msg) => {
   isMonitoring = false;
-  bot.sendMessage(msg.chat.id, '⏸️ PAUSA');
+  bot.sendMessage(msg.chat.id, '⏸️ Monitoraggio in PAUSA');
 });
 
 bot.onText(/\/resume/, (msg) => {
   isMonitoring = true;
-  bot.sendMessage(msg.chat.id, '▶️ ATTIVO');
+  bot.sendMessage(msg.chat.id, '▶️ Monitoraggio RIATTIVATO');
 });
 
-// Scheduler
+// ==================== SCHEDULER ====================
+
 const cronExpression = `*/${CHECK_INTERVAL} * * * *`;
 cron.schedule(cronExpression, async () => {
   if (isMonitoring) {
@@ -427,22 +542,48 @@ cron.schedule(cronExpression, async () => {
   }
 });
 
-// Start
-setTimeout(() => {
-  bot.sendMessage(CHAT_ID, `
+// ==================== INITIALIZATION ====================
+
+async function initialize() {
+  console.log('🚀 Inizializzazione bot...');
+  
+  // Import historical data
+  const imported = await importHistoricalData();
+  
+  if (imported) {
+    console.log('✅ Dati storici pronti! Analisi accurata da subito.');
+  } else {
+    console.log('⚠️ Import fallito. Uso raccolta manuale (50 check).');
+  }
+  
+  // Send startup message
+  setTimeout(async () => {
+    try {
+      await bot.sendMessage(CHAT_ID, `
 🚀 <b>Bot Avviato!</b>
 
-Monitoraggio 24/7
-📊 Check ogni ${CHECK_INTERVAL} min
+${imported ? '✅ Dati storici importati (' + priceHistory.length + ' prezzi)' : '📊 Modalità raccolta dati'}
+${imported ? '🎯 Analisi accurata da subito!' : '⏳ Analisi completa dopo 50 check'}
 
-/help per info
-`, { parse_mode: 'HTML' }).catch(err => {
-    console.error('Msg iniziale:', err.message);
-  });
-  
-  // First analysis
-  analyzeMarket();
-}, 3000);
+📊 Check ogni ${CHECK_INTERVAL} min
+⚡ Profilo: ${RISK_PROFILE}
+
+/help per comandi
+/info per stato
+`, { parse_mode: 'HTML' });
+    } catch (err) {
+      console.error('Errore msg iniziale:', err.message);
+    }
+    
+    // First analysis
+    if (imported) {
+      console.log('🔍 Prima analisi...');
+      await analyzeMarket();
+    }
+  }, 3000);
+}
+
+// ==================== ERROR HANDLING ====================
 
 process.on('unhandledRejection', (err) => {
   console.error('Rejection:', err.message);
@@ -452,4 +593,7 @@ process.on('uncaughtException', (err) => {
   console.error('Exception:', err.message);
 });
 
-console.log('✅ Bot ready (CoinGecko mode)!');
+// ==================== START ====================
+
+console.log('✅ Bot ready - Starting initialization...');
+initialize();
