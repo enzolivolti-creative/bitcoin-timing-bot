@@ -1,4 +1,4 @@
-// Railway version - Ultra resilient with API fallbacks
+// Final version - No Binance (avoids 451 completely)
 const TelegramBot = require('node-telegram-bot-api');
 const cron = require('node-cron');
 const axios = require('axios');
@@ -22,10 +22,11 @@ let lastBuyScore = 0;
 let lastSellScore = 0;
 let lastAction = 'HOLD';
 let isMonitoring = true;
+let priceHistory = []; // Cache prezzi per analisi
 
-console.log('🤖 Bitcoin Timing Bot - Ultra Resilient Mode');
-console.log(`📊 Check ogni ${CHECK_INTERVAL} minuti`);
-console.log(`⚡ Profilo: ${RISK_PROFILE}`);
+console.log('🤖 Bitcoin Bot - CoinGecko Mode (No 451!)');
+console.log(`📊 Check ogni ${CHECK_INTERVAL} min`);
+console.log(`⚡ ${RISK_PROFILE}`);
 
 const profileThresholds = {
   Conservative: { buyStrong: 75, buyWeak: 60, sellStrong: 75, sellWeak: 60 },
@@ -39,37 +40,8 @@ const profileMultipliers = {
   Aggressive: { position: 0.5, stopLoss: 0.05, tp1: 1.12, tp2: 1.25 }
 };
 
-// Safe API call wrapper
-async function safeAPICall(url, name, timeout = 10000) {
-  try {
-    const response = await axios.get(url, {
-      timeout,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json'
-      },
-      validateStatus: (status) => status < 500 // Accept 4xx as non-errors
-    });
-    
-    if (response.status === 451) {
-      console.warn(`⚠️ ${name}: Geoblocked (451)`);
-      return null;
-    }
-    
-    if (response.status >= 400) {
-      console.warn(`⚠️ ${name}: Status ${response.status}`);
-      return null;
-    }
-    
-    return response.data;
-  } catch (error) {
-    console.warn(`⚠️ ${name} fallito: ${error.message}`);
-    return null;
-  }
-}
-
 function calculateRSI(prices, period = 14) {
-  if (prices.length < period + 1) return null;
+  if (prices.length < period + 1) return 50; // Neutral default
   let gains = 0, losses = 0;
   for (let i = prices.length - period; i < prices.length; i++) {
     const change = prices[i] - prices[i - 1];
@@ -96,9 +68,7 @@ function calculateBollinger(prices, period = 20) {
   let position = 'middle';
   if (current < lower) position = 'below_lower';
   else if (current > upper) position = 'above_upper';
-  else if (current < sma) position = 'below_middle';
-  else position = 'above_middle';
-  return { upper, middle: sma, lower, position, current };
+  return { upper, lower, position, current };
 }
 
 function calculateSMA(prices, period) {
@@ -107,95 +77,92 @@ function calculateSMA(prices, period) {
   return recentPrices.reduce((a, b) => a + b) / period;
 }
 
+async function getBitcoinPrice() {
+  try {
+    // CoinGecko - più affidabile, no geoblocking
+    const response = await axios.get(
+      'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_market_cap=true',
+      {
+        timeout: 10000,
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'BitcoinTimingBot/1.0'
+        }
+      }
+    );
+    
+    if (response.data && response.data.bitcoin) {
+      return {
+        price: response.data.bitcoin.usd,
+        change24h: response.data.bitcoin.usd_24h_change || 0
+      };
+    }
+    
+    return null;
+  } catch (error) {
+    console.warn(`⚠️ CoinGecko: ${error.message}`);
+    return null;
+  }
+}
+
+async function getFearGreed() {
+  try {
+    const response = await axios.get(
+      'https://api.alternative.me/fng/?limit=1',
+      { timeout: 5000 }
+    );
+    
+    if (response.data && response.data.data && response.data.data[0]) {
+      return parseInt(response.data.data[0].value);
+    }
+    
+    return null;
+  } catch (error) {
+    console.warn('⚠️ F&G skip');
+    return null;
+  }
+}
+
 async function analyzeMarket() {
   try {
     console.log(`🔍 [${new Date().toLocaleTimeString()}] Analisi...`);
     
-    // Try Binance first
-    let currentPrice = null;
-    let priceChangePct = 0;
-    let historicalPrices = [];
+    // Get price from CoinGecko
+    const priceData = await getBitcoinPrice();
     
-    console.log('📊 Tentativo Binance...');
-    const binanceData = await safeAPICall(
-      'https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT',
-      'Binance Ticker'
-    );
-    
-    if (binanceData) {
-      currentPrice = parseFloat(binanceData.lastPrice);
-      priceChangePct = parseFloat(binanceData.priceChangePercent);
-      console.log(`✅ Binance OK: $${currentPrice.toFixed(2)}`);
-      
-      // Get historical
-      const klinesData = await safeAPICall(
-        'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=200',
-        'Binance Klines'
-      );
-      
-      if (klinesData) {
-        historicalPrices = klinesData.map(k => parseFloat(k[4]));
-        historicalPrices[historicalPrices.length - 1] = currentPrice;
-      }
-    }
-    
-    // Fallback to CoinGecko if Binance fails
-    if (!currentPrice) {
-      console.log('📊 Fallback CoinGecko...');
-      const cgData = await safeAPICall(
-        'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true',
-        'CoinGecko'
-      );
-      
-      if (cgData && cgData.bitcoin) {
-        currentPrice = cgData.bitcoin.usd;
-        priceChangePct = cgData.bitcoin.usd_24h_change || 0;
-        console.log(`✅ CoinGecko OK: $${currentPrice.toFixed(2)}`);
-      }
-    }
-    
-    // If still no price, abort
-    if (!currentPrice) {
-      console.error('❌ Impossibile ottenere prezzo Bitcoin');
+    if (!priceData) {
+      console.error('❌ Impossibile ottenere prezzo');
       return;
     }
     
-    // Generate fake historical if needed (last resort)
-    if (historicalPrices.length === 0) {
-      console.warn('⚠️ Uso dati stimati per analisi');
-      // Generate approximate historical based on current price
-      historicalPrices = Array.from({ length: 200 }, (_, i) => {
-        const daysAgo = 199 - i;
-        const volatility = Math.random() * 0.05 - 0.025; // ±2.5%
-        return currentPrice * (1 + volatility * daysAgo / 100);
-      });
-      historicalPrices.push(currentPrice);
+    const currentPrice = priceData.price;
+    const priceChangePct = priceData.change24h;
+    
+    console.log(`💰 $${currentPrice.toFixed(2)} (${priceChangePct >= 0 ? '+' : ''}${priceChangePct.toFixed(2)}%)`);
+    
+    // Build price history
+    priceHistory.push(currentPrice);
+    if (priceHistory.length > 200) {
+      priceHistory.shift(); // Keep last 200
     }
     
-    // Try Fear & Greed (optional)
-    let fearGreedValue = null;
-    console.log('😨 Tentativo Fear & Greed...');
-    const fgData = await safeAPICall(
-      'https://api.alternative.me/fng/?limit=1',
-      'Fear & Greed',
-      5000
-    );
-    
-    if (fgData && fgData.data && fgData.data[0]) {
-      fearGreedValue = parseInt(fgData.data[0].value);
-      console.log(`✅ F&G: ${fearGreedValue}`);
-    } else {
-      console.log('⚠️ F&G non disponibile, continuo senza');
+    // Need at least 50 prices for meaningful analysis
+    if (priceHistory.length < 50) {
+      console.log(`📊 Raccolta dati... ${priceHistory.length}/50`);
+      return;
     }
+    
+    // Get Fear & Greed (optional)
+    const fearGreedValue = await getFearGreed();
     
     // Calculate indicators
-    const rsi = calculateRSI(historicalPrices);
-    const bollinger = calculateBollinger(historicalPrices);
-    const sma200 = calculateSMA(historicalPrices, 200);
-    const recentHigh = Math.max(...historicalPrices);
+    const rsi = calculateRSI(priceHistory);
+    const bollinger = calculateBollinger(priceHistory);
+    const sma200 = calculateSMA(priceHistory, Math.min(200, priceHistory.length));
+    const recentHigh = Math.max(...priceHistory);
     const drawdown = ((currentPrice - recentHigh) / recentHigh) * 100;
     
-    console.log(`📈 RSI: ${rsi?.toFixed(1)}, DD: ${drawdown.toFixed(1)}%`);
+    console.log(`📈 RSI: ${rsi.toFixed(1)}, DD: ${drawdown.toFixed(1)}%`);
     
     // Buy Score
     let buyScore = 0;
@@ -203,7 +170,7 @@ async function analyzeMarket() {
     
     if (rsi < 25) {
       buyScore += 30;
-      buyReasons.push(`RSI ipervenduto forte (${rsi.toFixed(1)})`);
+      buyReasons.push(`RSI molto ipervenduto (${rsi.toFixed(1)})`);
     } else if (rsi < 30) {
       buyScore += 20;
       buyReasons.push(`RSI ipervenduto (${rsi.toFixed(1)})`);
@@ -213,18 +180,16 @@ async function analyzeMarket() {
     
     if (bollinger && bollinger.position === 'below_lower') {
       buyScore += 20;
-      buyReasons.push('Sotto banda Bollinger inferiore');
-    } else if (bollinger && bollinger.current <= bollinger.lower * 1.01) {
-      buyScore += 10;
+      buyReasons.push('Sotto banda Bollinger');
     }
     
     if (fearGreedValue !== null) {
       if (fearGreedValue < 20) {
         buyScore += 25;
-        buyReasons.push(`Fear & Greed paura estrema (${fearGreedValue})`);
+        buyReasons.push(`Paura estrema (${fearGreedValue})`);
       } else if (fearGreedValue < 30) {
         buyScore += 15;
-        buyReasons.push(`Fear & Greed paura (${fearGreedValue})`);
+        buyReasons.push(`Paura mercato (${fearGreedValue})`);
       } else if (fearGreedValue < 50) {
         buyScore += 5;
       }
@@ -250,7 +215,7 @@ async function analyzeMarket() {
     
     if (rsi > 80) {
       sellScore += 30;
-      sellReasons.push(`RSI ipercomprato forte (${rsi.toFixed(1)})`);
+      sellReasons.push(`RSI molto ipercomprato (${rsi.toFixed(1)})`);
     } else if (rsi > 75) {
       sellScore += 20;
       sellReasons.push(`RSI ipercomprato (${rsi.toFixed(1)})`);
@@ -260,23 +225,23 @@ async function analyzeMarket() {
     
     if (bollinger && bollinger.position === 'above_upper') {
       sellScore += 20;
-      sellReasons.push('Sopra banda Bollinger superiore');
+      sellReasons.push('Sopra banda Bollinger');
     }
     
     if (fearGreedValue !== null) {
       if (fearGreedValue > 85) {
         sellScore += 25;
-        sellReasons.push(`Fear & Greed avidità estrema (${fearGreedValue})`);
+        sellReasons.push(`Avidità estrema (${fearGreedValue})`);
       } else if (fearGreedValue > 75) {
         sellScore += 15;
-        sellReasons.push(`Fear & Greed avidità (${fearGreedValue})`);
+        sellReasons.push(`Avidità mercato (${fearGreedValue})`);
       }
     }
     
-    const sma50 = calculateSMA(historicalPrices, 50);
+    const sma50 = calculateSMA(priceHistory, Math.min(50, priceHistory.length));
     if (sma50 && sma200 && currentPrice > sma50 && sma50 > sma200 && drawdown >= -10) {
       sellScore += 15;
-      sellReasons.push('Vicino massimi storici');
+      sellReasons.push('Vicino massimi');
     }
     
     sellScore = Math.max(0, Math.min(100, sellScore));
@@ -329,9 +294,15 @@ async function analyzeMarket() {
     
     console.log(`📊 Buy: ${buyScore}, Sell: ${sellScore} → ${action}`);
     
-    const shouldNotify = checkIfShouldNotify(action, buyScore, sellScore);
+    // Check if should notify
+    const shouldNotify = (
+      (action !== lastAction && action !== 'HOLD') ||
+      buyScore >= BUY_THRESHOLD ||
+      sellScore >= SELL_THRESHOLD ||
+      (ONLY_STRONG_SIGNALS && (action === 'BUY_STRONG' || action === 'SELL_STRONG'))
+    );
     
-    if (shouldNotify) {
+    if (shouldNotify && Math.abs(buyScore - lastBuyScore) >= 10) {
       await sendAlert({
         action, actionIcon, actionText, confidence, currentPrice, priceChangePct,
         buyScore, sellScore, buyReasons, sellReasons,
@@ -346,30 +317,8 @@ async function analyzeMarket() {
     lastAction = action;
     
   } catch (error) {
-    console.error('❌ Errore generale:', error.message);
+    console.error('❌ Errore:', error.message);
   }
-}
-
-function checkIfShouldNotify(action, buyScore, sellScore) {
-  if (action === lastAction && 
-      Math.abs(buyScore - lastBuyScore) < 10 && 
-      Math.abs(sellScore - lastSellScore) < 10) {
-    return false;
-  }
-  
-  if (ONLY_STRONG_SIGNALS) {
-    return action === 'BUY_STRONG' || action === 'SELL_STRONG';
-  }
-  
-  if (buyScore >= BUY_THRESHOLD || sellScore >= SELL_THRESHOLD) {
-    return true;
-  }
-  
-  if (action !== lastAction && action !== 'HOLD') {
-    return true;
-  }
-  
-  return false;
 }
 
 async function sendAlert(data) {
@@ -426,7 +375,7 @@ ${actionIcon} <b>${actionText}</b>
     
     message += `
 📊 <b>INDICATORI</b>
-• RSI: ${rsi?.toFixed(1) || 'N/A'}
+• RSI: ${rsi.toFixed(1)}
 • F&G: ${fearGreedValue || 'N/A'}
 • DD: ${drawdown.toFixed(1)}%
 
@@ -437,21 +386,21 @@ ${actionIcon} <b>${actionText}</b>
     console.log(`✅ Alert inviato!`);
     
   } catch (error) {
-    console.error('❌ Errore alert:', error.message);
+    console.error('❌ Alert fallito:', error.message);
   }
 }
 
 // Commands
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(msg.chat.id, `
-🤖 <b>Bitcoin Bot ATTIVO</b>
+🤖 <b>Bitcoin Bot</b>
 
 ⚙️ Check ogni ${CHECK_INTERVAL} min
 ⚡ ${RISK_PROFILE}
 
-/status - Analisi ora
+/status - Analisi
 /pause - Pausa
-/resume - Riprendi
+/resume - Attivo
 `, { parse_mode: 'HTML' });
 });
 
@@ -486,11 +435,12 @@ setTimeout(() => {
 Monitoraggio 24/7
 📊 Check ogni ${CHECK_INTERVAL} min
 
-/help per comandi
+/help per info
 `, { parse_mode: 'HTML' }).catch(err => {
-    console.error('Errore msg:', err.message);
+    console.error('Msg iniziale:', err.message);
   });
   
+  // First analysis
   analyzeMarket();
 }, 3000);
 
@@ -498,4 +448,8 @@ process.on('unhandledRejection', (err) => {
   console.error('Rejection:', err.message);
 });
 
-console.log('✅ Bot pronto con fallback multipli!');
+process.on('uncaughtException', (err) => {
+  console.error('Exception:', err.message);
+});
+
+console.log('✅ Bot ready (CoinGecko mode)!');
