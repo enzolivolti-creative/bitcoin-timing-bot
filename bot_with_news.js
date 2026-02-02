@@ -1,9 +1,9 @@
-require('dotenv').config();
+// Railway-compatible version - ENV vars already available
 const TelegramBot = require('node-telegram-bot-api');
 const cron = require('node-cron');
 const axios = require('axios');
 
-// Configurazione
+// Configurazione - Railway provides ENV vars directly
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const CHECK_INTERVAL = parseInt(process.env.CHECK_INTERVAL) || 15;
@@ -11,6 +11,19 @@ const BUY_THRESHOLD = parseInt(process.env.BUY_THRESHOLD) || 70;
 const SELL_THRESHOLD = parseInt(process.env.SELL_THRESHOLD) || 70;
 const RISK_PROFILE = process.env.RISK_PROFILE || 'Moderate';
 const ONLY_STRONG_SIGNALS = process.env.ONLY_STRONG_SIGNALS === 'true';
+
+// Verifica configurazione
+if (!BOT_TOKEN) {
+  console.error('❌ TELEGRAM_BOT_TOKEN non trovato nelle variabili d\'ambiente!');
+  console.error('Aggiungi la variabile su Railway: Variables → New Variable');
+  process.exit(1);
+}
+
+if (!CHAT_ID) {
+  console.error('❌ TELEGRAM_CHAT_ID non trovato nelle variabili d\'ambiente!');
+  console.error('Aggiungi la variabile su Railway: Variables → New Variable');
+  process.exit(1);
+}
 
 // Inizializza bot
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
@@ -23,7 +36,7 @@ let isMonitoring = true;
 let lastNewsCheck = null;
 let cachedNews = null;
 
-console.log('🤖 Bitcoin Timing Bot avviato con NEWS INTELLIGENCE!');
+console.log('🤖 Bitcoin Timing Bot avviato su Railway!');
 console.log(`📊 Check ogni ${CHECK_INTERVAL} minuti`);
 console.log(`🎯 Soglie: Buy=${BUY_THRESHOLD}, Sell=${SELL_THRESHOLD}`);
 console.log(`⚡ Profilo: ${RISK_PROFILE}`);
@@ -33,95 +46,30 @@ console.log(`⚡ Profilo: ${RISK_PROFILE}`);
 async function fetchBitcoinNews() {
   try {
     console.log('📰 Recupero news Bitcoin...');
-    
-    // Usa multiple fonti per news crypto
-    const sources = [
-      {
-        name: 'CoinDesk',
-        url: 'https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml',
-        type: 'rss'
-      },
-      {
-        name: 'CryptoNews',
-        url: 'https://cryptonews.com/news/bitcoin-news/',
-        type: 'web'
-      }
-    ];
-    
-    // Fetch da NewsAPI (alternativa se disponibile)
     let articles = [];
     
-    try {
-      // Opzione 1: NewsAPI (richiede API key - opzionale)
-      if (process.env.NEWS_API_KEY) {
-        const newsApiUrl = `https://newsapi.org/v2/everything?q=bitcoin&sortBy=publishedAt&language=en&apiKey=${process.env.NEWS_API_KEY}`;
-        const response = await axios.get(newsApiUrl);
-        articles = response.data.articles.slice(0, 10);
-      }
-    } catch (e) {
-      console.log('NewsAPI non disponibile, uso fonti alternative');
-    }
-    
-    // Opzione 2: CryptoPanic API (gratuita)
+    // CryptoPanic API (gratuita)
     try {
       const cryptoPanicUrl = 'https://cryptopanic.com/api/v1/posts/?auth_token=free&currencies=BTC&kind=news';
       const response = await axios.get(cryptoPanicUrl);
       
       if (response.data && response.data.results) {
-        const recentNews = response.data.results.slice(0, 10).map(item => ({
+        articles = response.data.results.slice(0, 10).map(item => ({
           title: item.title,
           url: item.url,
           publishedAt: item.published_at,
           sentiment: item.votes ? (item.votes.positive - item.votes.negative) : 0,
           source: item.source?.title || 'CryptoPanic'
         }));
-        
-        articles = [...articles, ...recentNews];
       }
     } catch (e) {
       console.warn('CryptoPanic non disponibile:', e.message);
-    }
-    
-    // Fallback: scraping semplificato (ultimi titoli)
-    if (articles.length === 0) {
-      console.log('Uso fallback per news...');
-      articles = await scrapeBitcoinNews();
     }
     
     return articles;
     
   } catch (error) {
     console.error('❌ Errore recupero news:', error.message);
-    return [];
-  }
-}
-
-async function scrapeBitcoinNews() {
-  // Fallback: recupera titoli da Google News Bitcoin
-  try {
-    const response = await axios.get('https://news.google.com/rss/search?q=bitcoin&hl=en-US&gl=US&ceid=US:en', {
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    
-    // Parsing XML semplificato (cerca <title> tags)
-    const titleRegex = /<title><!\[CDATA\[(.*?)\]\]><\/title>/g;
-    const titles = [];
-    let match;
-    
-    while ((match = titleRegex.exec(response.data)) !== null) {
-      if (titles.length < 10) {
-        titles.push({
-          title: match[1],
-          source: 'Google News',
-          publishedAt: new Date().toISOString()
-        });
-      }
-    }
-    
-    return titles;
-    
-  } catch (e) {
-    console.error('Fallback news failed:', e.message);
     return [];
   }
 }
@@ -137,7 +85,6 @@ async function analyzeNewsImpact(articles, currentPrice, priceChangePct) {
       };
     }
     
-    // Analizza sentiment dai titoli
     const positiveKeywords = [
       'surge', 'rally', 'soar', 'pump', 'bullish', 'adoption', 'approved', 'etf',
       'institutional', 'buying', 'accumulation', 'breakout', 'high', 'record',
@@ -164,7 +111,6 @@ async function analyzeNewsImpact(articles, currentPrice, priceChangePct) {
     articles.forEach(article => {
       const title = (article.title || '').toLowerCase();
       
-      // Check keywords
       const hasPositive = positiveKeywords.some(kw => title.includes(kw));
       const hasNegative = negativeKeywords.some(kw => title.includes(kw));
       const hasCritical = criticalKeywords.some(kw => title.includes(kw));
@@ -187,7 +133,6 @@ async function analyzeNewsImpact(articles, currentPrice, priceChangePct) {
         });
       }
       
-      // Aggiungi eventi importanti
       if ((hasPositive || hasNegative || hasCritical) && keyEvents.length < 3) {
         if (!keyEvents.find(e => e.title === article.title)) {
           keyEvents.push({
@@ -199,7 +144,6 @@ async function analyzeNewsImpact(articles, currentPrice, priceChangePct) {
       }
     });
     
-    // Determina impact
     let impact = 'NEUTRAL';
     let summary = '';
     
@@ -217,12 +161,11 @@ async function analyzeNewsImpact(articles, currentPrice, priceChangePct) {
       summary = `⚖️ Sentiment misto: ${positiveCount} positive, ${negativeCount} negative`;
     }
     
-    // Correlazione con movimento prezzo
     if (Math.abs(priceChangePct) > 5) {
       if (priceChangePct > 5 && sentimentScore > 0) {
-        summary += ' - movimento prezzo coerente con news positive';
+        summary += ' - movimento coerente con news positive';
       } else if (priceChangePct < -5 && sentimentScore < 0) {
-        summary += ' - movimento prezzo coerente con news negative';
+        summary += ' - movimento coerente con news negative';
       } else if (priceChangePct < -5 && sentimentScore > 0) {
         summary += ' ⚠️ DIVERGENZA: news positive ma prezzo scende (possibile opportunità)';
         impact = 'DIVERGENCE_POSITIVE';
@@ -253,7 +196,7 @@ async function analyzeNewsImpact(articles, currentPrice, priceChangePct) {
   }
 }
 
-// ==================== LOGICA ANALISI (con News) ====================
+// ==================== ANALISI TECNICA ====================
 
 const profileThresholds = {
   Conservative: { buyStrong: 75, buyWeak: 60, sellStrong: 75, sellWeak: 60 },
@@ -308,9 +251,8 @@ function calculateSMA(prices, period) {
 
 async function analyzeMarket() {
   try {
-    console.log(`🔍 [${new Date().toLocaleTimeString('it-IT')}] Analisi completa in corso...`);
+    console.log(`🔍 [${new Date().toLocaleTimeString('it-IT')}] Analisi in corso...`);
     
-    // 1. Fetch dati Binance
     const tickerRes = await axios.get('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
     const currentPrice = parseFloat(tickerRes.data.lastPrice);
     const priceChangePct = parseFloat(tickerRes.data.priceChangePercent);
@@ -319,7 +261,7 @@ async function analyzeMarket() {
     const historicalPrices = klinesRes.data.map(k => parseFloat(k[4]));
     historicalPrices[historicalPrices.length - 1] = currentPrice;
     
-    // 2. NEWS INTELLIGENCE (cache 30 min)
+    // NEWS (cache 30 min)
     let newsAnalysis = null;
     const now = Date.now();
     
@@ -327,7 +269,6 @@ async function analyzeMarket() {
       console.log('📰 Aggiornamento news...');
       const articles = await fetchBitcoinNews();
       newsAnalysis = await analyzeNewsImpact(articles, currentPrice, priceChangePct);
-      
       cachedNews = newsAnalysis;
       lastNewsCheck = now;
     } else {
@@ -335,7 +276,6 @@ async function analyzeMarket() {
       newsAnalysis = cachedNews;
     }
     
-    // 3. Fear & Greed
     let fearGreedValue = null;
     try {
       const fgRes = await axios.get('https://api.alternative.me/fng/?limit=1');
@@ -344,14 +284,13 @@ async function analyzeMarket() {
       console.warn('Fear & Greed non disponibile');
     }
     
-    // 4. Calcola indicatori tecnici
     const rsi = calculateRSI(historicalPrices);
     const bollinger = calculateBollinger(historicalPrices);
     const sma200 = calculateSMA(historicalPrices, 200);
     const recentHigh = Math.max(...historicalPrices);
     const drawdown = ((currentPrice - recentHigh) / recentHigh) * 100;
     
-    // 5. Calcola Buy Score (con adjustment news)
+    // Buy Score
     let buyScore = 0;
     const buyReasons = [];
     
@@ -401,24 +340,23 @@ async function analyzeMarket() {
       buyScore += 5;
     }
     
-    // NEWS ADJUSTMENT per Buy Score
+    // NEWS adjustment
     if (newsAnalysis) {
       if (newsAnalysis.impact === 'POSITIVE') {
         buyScore += 10;
-        buyReasons.push(`📰 News positive: ${newsAnalysis.summary}`);
+        buyReasons.push(`📰 ${newsAnalysis.summary}`);
       } else if (newsAnalysis.impact === 'CRITICAL_NEGATIVE') {
         buyScore -= 20;
-        buyReasons.push(`⚠️ News critiche negative: ${newsAnalysis.summary}`);
+        buyReasons.push(`⚠️ ${newsAnalysis.summary}`);
       } else if (newsAnalysis.impact === 'DIVERGENCE_POSITIVE') {
         buyScore += 15;
-        buyReasons.push(`🎯 OPPORTUNITÀ: ${newsAnalysis.summary}`);
+        buyReasons.push(`🎯 ${newsAnalysis.summary}`);
       }
     }
     
-    // Cap buy score 0-100
     buyScore = Math.max(0, Math.min(100, buyScore));
     
-    // 6. Calcola Sell Score (con adjustment news)
+    // Sell Score
     let sellScore = 0;
     const sellReasons = [];
     
@@ -455,27 +393,20 @@ async function analyzeMarket() {
     if (sma50 && sma200 && currentPrice > sma50 && sma50 > sma200) {
       if (drawdown >= -10) {
         sellScore += 15;
-        sellReasons.push('Prezzo vicino ai massimi - distribuzione');
+        sellReasons.push('Prezzo vicino ai massimi');
       } else {
         sellScore += 10;
       }
     }
     
-    // NEWS ADJUSTMENT per Sell Score
-    if (newsAnalysis) {
-      if (newsAnalysis.impact === 'NEGATIVE' || newsAnalysis.impact === 'CRITICAL_NEGATIVE') {
-        sellScore += 15;
-        sellReasons.push(`📰 News negative: ${newsAnalysis.summary}`);
-      } else if (newsAnalysis.impact === 'DIVERGENCE_NEGATIVE') {
-        sellScore += 10;
-        sellReasons.push(`⚠️ CAUTELA: ${newsAnalysis.summary}`);
-      }
+    if (newsAnalysis && (newsAnalysis.impact === 'NEGATIVE' || newsAnalysis.impact === 'CRITICAL_NEGATIVE')) {
+      sellScore += 15;
+      sellReasons.push(`📰 ${newsAnalysis.summary}`);
     }
     
-    // Cap sell score
     sellScore = Math.max(0, Math.min(100, sellScore));
     
-    // 7. Genera azione e trading plan
+    // Determina azione
     const thresholds = profileThresholds[RISK_PROFILE];
     const multipliers = profileMultipliers[RISK_PROFILE];
     
@@ -511,16 +442,6 @@ async function analyzeMarket() {
       confidence = 45;
     }
     
-    // Adjust confidence based on news
-    if (newsAnalysis) {
-      if (newsAnalysis.impact === 'CRITICAL_NEGATIVE' && action.startsWith('BUY')) {
-        confidence = Math.max(40, confidence - 20);
-      } else if (newsAnalysis.impact === 'DIVERGENCE_POSITIVE' && action.startsWith('BUY')) {
-        confidence = Math.min(95, confidence + 10);
-      }
-    }
-    
-    // Trading plan
     const entryLow = currentPrice * 0.985;
     const entryHigh = currentPrice * 1.015;
     const stopLossPrice = currentPrice * (1 - multipliers.stopLoss);
@@ -532,40 +453,19 @@ async function analyzeMarket() {
     const positionSize = multipliers.position * 100;
     
     console.log(`📊 Buy: ${buyScore}, Sell: ${sellScore}, Azione: ${action}`);
-    console.log(`📰 News Impact: ${newsAnalysis?.impact}`);
     
-    // 8. Determina se inviare notifica
     const shouldNotify = checkIfShouldNotify(action, buyScore, sellScore, confidence);
     
     if (shouldNotify) {
       await sendAlert({
-        action,
-        actionIcon,
-        actionText,
-        confidence,
-        currentPrice,
-        priceChangePct,
-        buyScore,
-        sellScore,
-        buyReasons,
-        sellReasons,
-        entryLow,
-        entryHigh,
-        stopLossPrice,
-        stopLossPct,
-        tp1Price,
-        tp1Pct,
-        tp2Price,
-        tp2Pct,
-        positionSize,
-        rsi,
-        fearGreedValue,
-        drawdown,
-        newsAnalysis
+        action, actionIcon, actionText, confidence, currentPrice, priceChangePct,
+        buyScore, sellScore, buyReasons, sellReasons,
+        entryLow, entryHigh, stopLossPrice, stopLossPct,
+        tp1Price, tp1Pct, tp2Price, tp2Pct, positionSize,
+        rsi, fearGreedValue, drawdown, newsAnalysis
       });
     }
     
-    // Aggiorna stato
     lastBuyScore = buyScore;
     lastSellScore = sellScore;
     lastAction = action;
@@ -625,7 +525,6 @@ ${actionIcon} <b>${actionText}</b>
 • Sell Score: ${sellScore}/100
 `;
 
-    // NEWS CONTEXT (se rilevante)
     if (newsAnalysis && newsAnalysis.impact !== 'NEUTRAL') {
       message += `
 📰 <b>CONTESTO NEWS</b>
@@ -643,40 +542,35 @@ ${newsAnalysis.summary}
       }
     }
 
-    // Trading plan
     if (action.startsWith('BUY')) {
       message += `
 🎯 <b>TRADING PLAN</b>
-• Entry Range: $${entryLow.toFixed(0)} - $${entryHigh.toFixed(0)}
+• Entry: $${entryLow.toFixed(0)} - $${entryHigh.toFixed(0)}
 • Posizione: ${positionSize.toFixed(0)}% portafoglio
 • Stop Loss: $${stopLossPrice.toFixed(0)} (${stopLossPct.toFixed(1)}%)
-• Take Profit 1: $${tp1Price.toFixed(0)} (+${tp1Pct.toFixed(1)}%)
-• Take Profit 2: $${tp2Price.toFixed(0)} (+${tp2Pct.toFixed(1)}%)
+• TP1: $${tp1Price.toFixed(0)} (+${tp1Pct.toFixed(1)}%)
+• TP2: $${tp2Price.toFixed(0)} (+${tp2Pct.toFixed(1)}%)
 
 💡 <b>PERCHÉ ORA</b>
 `;
-      buyReasons.slice(0, 4).forEach(reason => {
-        message += `• ${reason}\n`;
-      });
+      buyReasons.slice(0, 4).forEach(r => message += `• ${r}\n`);
       
     } else if (action.startsWith('SELL')) {
       message += `
-🎯 <b>AZIONE SUGGERITA</b>
+🎯 <b>AZIONE</b>
 • Vendi: ${positionSize.toFixed(0)}% posizione
-• Stop Loss (trailing): $${stopLossPrice.toFixed(0)}
+• Stop Loss: $${stopLossPrice.toFixed(0)}
 
 💡 <b>PERCHÉ ORA</b>
 `;
-      sellReasons.slice(0, 4).forEach(reason => {
-        message += `• ${reason}\n`;
-      });
+      sellReasons.slice(0, 4).forEach(r => message += `• ${r}\n`);
     }
     
     message += `
 📊 <b>INDICATORI</b>
-• RSI(14): ${rsi.toFixed(1)}
-• Fear & Greed: ${fearGreedValue || 'N/A'}
-• Drawdown: ${drawdown.toFixed(1)}%
+• RSI: ${rsi.toFixed(1)}
+• F&G: ${fearGreedValue || 'N/A'}
+• DD: ${drawdown.toFixed(1)}%
 
 ⏰ ${new Date().toLocaleString('it-IT')}
 `;
@@ -685,11 +579,11 @@ ${newsAnalysis.summary}
     console.log(`✅ Alert inviato: ${actionText}`);
     
   } catch (error) {
-    console.error('❌ Errore invio alert:', error.message);
+    console.error('❌ Errore invio:', error.message);
   }
 }
 
-// ==================== COMANDI BOT ====================
+// ==================== COMANDI ====================
 
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
@@ -697,42 +591,30 @@ bot.onText(/\/start/, (msg) => {
 🤖 <b>Bitcoin Timing Bot ATTIVO</b>
 📰 <b>CON NEWS INTELLIGENCE!</b>
 
-Monitoro il mercato 24/7 e analizzo news in tempo reale per darti il contesto completo!
-
-⚙️ <b>Configurazione:</b>
-• Check ogni ${CHECK_INTERVAL} minuti
+⚙️ <b>Config:</b>
+• Check ogni ${CHECK_INTERVAL} min
 • Profilo: ${RISK_PROFILE}
 • Soglie: Buy=${BUY_THRESHOLD}, Sell=${SELL_THRESHOLD}
 
-✨ <b>NOVITÀ:</b>
-Ogni alert include:
-📊 Analisi tecnica completa
-📰 Sentiment news Bitcoin
-🎯 Trading plan dettagliato
-💡 Contesto di mercato
-
 📋 <b>Comandi:</b>
-/status - Analisi completa ora
-/news - Solo analisi news
-/pause - Pausa monitoraggio
+/status - Analisi ora
+/news - Solo news
+/pause - Pausa
 /resume - Riprendi
-/config - Info configurazione
 /help - Guida
-
-Il bot è <b>autonomo</b>: riceverai notifiche quando necessario!
 `, { parse_mode: 'HTML' });
 });
 
 bot.onText(/\/status/, async (msg) => {
   const chatId = msg.chat.id;
-  await bot.sendMessage(chatId, '🔍 Analisi completa in corso (tecnica + news)...');
+  await bot.sendMessage(chatId, '🔍 Analisi in corso...');
   await analyzeMarket();
 });
 
 bot.onText(/\/news/, async (msg) => {
   const chatId = msg.chat.id;
   try {
-    await bot.sendMessage(chatId, '📰 Recupero news Bitcoin...');
+    await bot.sendMessage(chatId, '📰 Recupero news...');
     
     const articles = await fetchBitcoinNews();
     const tickerRes = await axios.get('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
@@ -741,100 +623,54 @@ bot.onText(/\/news/, async (msg) => {
     
     const analysis = await analyzeNewsImpact(articles, currentPrice, priceChangePct);
     
-    let newsMessage = `
-📰 <b>ANALISI NEWS BITCOIN</b>
+    let msg = `
+📰 <b>ANALISI NEWS</b>
 
 ${analysis.summary}
 
-<b>Sentiment Score:</b> ${analysis.sentiment > 0 ? '+' : ''}${analysis.sentiment}
-<b>News Positive:</b> ${analysis.positiveCount}
-<b>News Negative:</b> ${analysis.negativeCount}
-<b>Eventi Critici:</b> ${analysis.criticalCount}
-
+Sentiment: ${analysis.sentiment > 0 ? '+' : ''}${analysis.sentiment}
+Positive: ${analysis.positiveCount}
+Negative: ${analysis.negativeCount}
+Critiche: ${analysis.criticalCount}
 `;
     
     if (analysis.keyEvents && analysis.keyEvents.length > 0) {
-      newsMessage += `\n<b>📌 Eventi Chiave:</b>\n`;
-      analysis.keyEvents.forEach(event => {
-        const emoji = event.type === 'CRITICAL' ? '🚨' : event.type === 'NEGATIVE' ? '🔴' : '🟢';
-        newsMessage += `\n${emoji} <b>${event.source}</b>\n${event.title}\n`;
+      msg += `\n<b>Eventi:</b>\n`;
+      analysis.keyEvents.forEach(e => {
+        const emoji = e.type === 'CRITICAL' ? '🚨' : e.type === 'NEGATIVE' ? '🔴' : '🟢';
+        msg += `\n${emoji} <b>${e.source}</b>\n${e.title}\n`;
       });
     }
     
-    await bot.sendMessage(chatId, newsMessage, { parse_mode: 'HTML' });
-    
-  } catch (error) {
-    await bot.sendMessage(chatId, '❌ Errore nel recupero news. Riprova tra poco.');
+    await bot.sendMessage(chatId, msg, { parse_mode: 'HTML' });
+  } catch (e) {
+    await bot.sendMessage(chatId, '❌ Errore news');
   }
 });
 
 bot.onText(/\/pause/, (msg) => {
-  const chatId = msg.chat.id;
   isMonitoring = false;
-  bot.sendMessage(chatId, '⏸️ Monitoraggio in PAUSA. Usa /resume per riattivare.');
+  bot.sendMessage(msg.chat.id, '⏸️ In PAUSA');
 });
 
 bot.onText(/\/resume/, (msg) => {
-  const chatId = msg.chat.id;
   isMonitoring = true;
-  bot.sendMessage(chatId, '▶️ Monitoraggio RIATTIVATO!');
-});
-
-bot.onText(/\/config/, (msg) => {
-  const chatId = msg.chat.id;
-  bot.sendMessage(chatId, `
-⚙️ <b>Configurazione Attuale</b>
-
-• Intervallo check: ${CHECK_INTERVAL} min
-• Profilo rischio: ${RISK_PROFILE}
-• Soglia Buy: ${BUY_THRESHOLD}
-• Soglia Sell: ${SELL_THRESHOLD}
-• Solo segnali forti: ${ONLY_STRONG_SIGNALS ? 'Sì' : 'No'}
-• Stato: ${isMonitoring ? '🟢 Attivo' : '🔴 In pausa'}
-• News Intelligence: ✅ Attiva
-
-📰 Cache news: ${lastNewsCheck ? 'Aggiornata ' + new Date(lastNewsCheck).toLocaleTimeString('it-IT') : 'Mai'}
-
-Per modificare, edita il file .env e riavvia il bot.
-`, { parse_mode: 'HTML' });
+  bot.sendMessage(msg.chat.id, '▶️ RIATTIVATO');
 });
 
 bot.onText(/\/help/, (msg) => {
-  const chatId = msg.chat.id;
-  bot.sendMessage(chatId, `
-📚 <b>Guida Bitcoin Timing Bot + News</b>
+  bot.sendMessage(msg.chat.id, `
+📚 <b>Guida Bot</b>
 
-🤖 <b>FUNZIONAMENTO</b>
-Il bot controlla ogni ${CHECK_INTERVAL} minuti:
-📊 15+ indicatori tecnici
-📰 News Bitcoin da fonti principali
-🎯 Sentiment analysis automatica
-
-🔔 <b>TI AVVISA QUANDO</b>
-• Buy/Sell Score ≥ ${BUY_THRESHOLD}
-• Eventi critici nelle news
-• Divergenze prezzo/sentiment
-
-📰 <b>NEWS INTELLIGENCE</b>
-Il bot analizza:
-• Sentiment positivo/negativo
-• Eventi critici (regolazioni, hack, ecc.)
-• Correlazione news-prezzo
-• Divergenze (opportunità!)
-
-💡 <b>COME USARE</b>
-Ogni alert include:
+Il bot monitora Bitcoin 24/7 con:
 📊 Analisi tecnica
-📰 Contesto news
-🎯 Trading plan
-⚠️ Warning su eventi critici
+📰 News intelligence
+🎯 Segnali automatici
 
-⚙️ <b>COMANDI</b>
-/status - Analisi completa
+/status - Analisi ora
 /news - Solo news
 /pause - Pausa
 /resume - Riprendi
-/config - Impostazioni
 `, { parse_mode: 'HTML' });
 });
 
@@ -847,32 +683,30 @@ cron.schedule(cronExpression, async () => {
   }
 });
 
-// Check iniziale
 setTimeout(() => {
   bot.sendMessage(CHAT_ID, `
-🚀 <b>Bot Avviato con NEWS INTELLIGENCE!</b>
+🚀 <b>Bot Avviato!</b>
 
-Sto monitorando Bitcoin 24/7 con:
-📊 Analisi tecnica completa
-📰 News e sentiment analysis
-🎯 Correlazione prezzo-eventi
+Monitoraggio Bitcoin 24/7
+📊 Tecnica + 📰 News
 
-⚙️ Check ogni ${CHECK_INTERVAL} minuti
-📈 Profilo: ${RISK_PROFILE}
+Check ogni ${CHECK_INTERVAL} min
+Profilo: ${RISK_PROFILE}
 
-Usa /help per info
-Usa /news per vedere ultime news
-`, { parse_mode: 'HTML' });
+/help per comandi
+`, { parse_mode: 'HTML' }).catch(err => {
+    console.error('Errore invio messaggio iniziale:', err.message);
+  });
   
   analyzeMarket();
 }, 3000);
 
 process.on('unhandledRejection', (error) => {
-  console.error('❌ Unhandled rejection:', error);
+  console.error('❌ Rejection:', error);
 });
 
 process.on('uncaughtException', (error) => {
-  console.error('❌ Uncaught exception:', error);
+  console.error('❌ Exception:', error);
 });
 
-console.log('✅ Bot con News Intelligence pronto!');
+console.log('✅ Bot pronto su Railway!');
